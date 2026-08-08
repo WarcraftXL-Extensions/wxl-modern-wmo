@@ -1,4 +1,4 @@
-// wxl-wmo: the extension-wide service table pointer and hook-install convenience, shared by every
+// wxl-modern-wmo: the extension-wide service table pointer and hook-install convenience, shared by every
 // translation unit in this DLL.
 // Copyright (C) 2026 WarcraftXL
 //
@@ -18,6 +18,7 @@
 #pragma once
 
 #include "wxl/FdidApi.h"
+#include "wxl/LoadPoolApi.h"
 #include "wxl/M2DrawApi.h"
 #include "wxl/PluginApi.h"
 
@@ -26,12 +27,12 @@
 /// See wxl-adt's ExtensionApi.hpp for the reasoning behind every pattern here: the core hands this
 /// pointer to WXL_Load once and it lives for the process lifetime, so every detour installed later
 /// reaches it through here rather than threading an `api` parameter through the call chain.
-namespace wxl_wmo
+namespace wxl_modern_wmo
 {
     extern const WXL_Api* g_api;
 
     /// True builds the whole native WMO pipeline in; false is the single point that would leave the
-    /// client on its stock 3.3.5 WMO reader (ex wxl::features::modernWMOSupport).
+    /// client on its stock WMO reader.
     inline constexpr bool kEnabled = true;
 
     // --- wxl-db2's FileDataID resolver, fetched lazily (extensions load alphabetically; wxl-db2 may
@@ -52,7 +53,7 @@ namespace wxl_wmo
         return fdid ? fdid->ResolveTexture(fileDataId) : nullptr;
     }
 
-    // --- wxl-m2's one-shot draw interceptor, same lazy-fetch reasoning (wxl-m2 loads after wxl-wmo
+    // --- wxl-modern-m2's one-shot draw interceptor, same lazy-fetch reasoning (wxl-modern-m2 loads after wxl-modern-wmo
     // alphabetically too). Only the four-layer material path (LayeredShader.cpp) needs this. ---------
     extern const WXL_M2DrawApi* g_m2draw;
 
@@ -61,6 +62,19 @@ namespace wxl_wmo
         if (!g_m2draw)
             g_m2draw = static_cast<const WXL_M2DrawApi*>(g_api->GetInterface("wxl.m2draw", WXL_M2DRAW_API_VERSION));
         return g_m2draw;
+    }
+
+    // --- wxl-engine-reforged's background job pool for load-time fixup work. Same lazy-fetch reasoning
+    // (wxl-modern-wmo loads before wxl-engine-reforged alphabetically). A caller that gets null back
+    // (extension absent/disabled) falls back to running its stage1/stage2 inline itself. -------------
+    extern const WXL_LoadPoolApi* g_loadPool;
+
+    inline const WXL_LoadPoolApi* LoadPool()
+    {
+        if (!g_loadPool)
+            g_loadPool = static_cast<const WXL_LoadPoolApi*>(
+                g_api->GetInterface("wxl.loadpool", WXL_LOADPOOL_API_VERSION));
+        return g_loadPool;
     }
 
     /**
@@ -76,18 +90,33 @@ namespace wxl_wmo
                                  reinterpret_cast<void**>(original), priority);
     }
 
+    /**
+     * @brief Typed detour install over WXL_Api::HookAttachByName: same deduced-Fn safety as
+     *        HookAttach, but resolves the target by name through the core's own hook-point table
+     *        (see HookPoints.cpp) instead of an offsets/ address -- this extension needs no offsets/
+     *        header just to name a hook target.
+     */
+    template <class Fn>
+    inline int HookAttachByName(const char* pointName, Fn* detour, Fn** original,
+                                int priority = WXL_HOOK_DEFAULT_PRIORITY)
+    {
+        return g_api->HookAttachByName(pointName, reinterpret_cast<void*>(detour),
+                                       reinterpret_cast<void**>(original), priority);
+    }
+
     // Per-file installers, called from WXL_Load in Module.cpp.
     bool InstallWmoNative();       // WmoNative.cpp (root/group walk + material + cull, gated by kEnabled)
     bool InstallWmoSpawn();        // WmoSpawn.cpp (unconditional)
     bool InstallWmoGroupParse();   // GroupParse.cpp (unconditional)
     bool InstallOutdoorGate();     // OutdoorGate.cpp (gated by kEnabled)
     bool InstallCompositeShader(); // CompositeShader.cpp (gated by kEnabled)
+    bool InstallWmoAsync();        // WmoAsync.cpp (background root/group walk, gated by kEnabled)
 }
 
 // common/Log.hpp's WLOG_* macros need common/Log.cpp linked in, which is core/host/patcher-only; an
 // extension has no such object file, so these route the same call-site syntax through WXL_Api::Log.
-#define WLOG_TRACE(...) ::wxl_wmo::g_api->Log(WXL_LOG_TRACE, "wxl-wmo", __VA_ARGS__)
-#define WLOG_DEBUG(...) ::wxl_wmo::g_api->Log(WXL_LOG_DEBUG, "wxl-wmo", __VA_ARGS__)
-#define WLOG_INFO(...)  ::wxl_wmo::g_api->Log(WXL_LOG_INFO,  "wxl-wmo", __VA_ARGS__)
-#define WLOG_WARN(...)  ::wxl_wmo::g_api->Log(WXL_LOG_WARN,  "wxl-wmo", __VA_ARGS__)
-#define WLOG_ERROR(...) ::wxl_wmo::g_api->Log(WXL_LOG_ERROR, "wxl-wmo", __VA_ARGS__)
+#define WLOG_TRACE(...) ::wxl_modern_wmo::g_api->Log(WXL_LOG_TRACE, "wxl-modern-wmo", __VA_ARGS__)
+#define WLOG_DEBUG(...) ::wxl_modern_wmo::g_api->Log(WXL_LOG_DEBUG, "wxl-modern-wmo", __VA_ARGS__)
+#define WLOG_INFO(...)  ::wxl_modern_wmo::g_api->Log(WXL_LOG_INFO,  "wxl-modern-wmo", __VA_ARGS__)
+#define WLOG_WARN(...)  ::wxl_modern_wmo::g_api->Log(WXL_LOG_WARN,  "wxl-modern-wmo", __VA_ARGS__)
+#define WLOG_ERROR(...) ::wxl_modern_wmo::g_api->Log(WXL_LOG_ERROR, "wxl-modern-wmo", __VA_ARGS__)

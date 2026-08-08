@@ -34,7 +34,7 @@ namespace
     CreateMaterialFn g_origCreateMaterial = nullptr;
 
     /**
-     * @brief Modern replacement for CMapObj::CreateMaterial.
+     * @brief Modern replacement for the client's material-create routine.
      *
      * Reproduces the stock contract field for field -- idempotent guard on the first handle, the
      * fallback name for an empty texture_1, the shader 3/5/6 -> 4 collapse when texture_2 is empty, and
@@ -49,8 +49,9 @@ namespace
             return;
         }
 
-        auto* materials = static_cast<uint8_t*>(GetPtr(root, off::kOffMaterialBase));
-        const uint32_t count = Rd32(Field(root, off::kOffMaterialCount));
+        auto* r = static_cast<off::Root*>(root);
+        auto* materials = static_cast<uint8_t*>(r->materialBase);
+        const uint32_t count = r->materialCount;
         if (!materials || materialIndex < 0 || static_cast<uint32_t>(materialIndex) >= count)
             return;
 
@@ -60,7 +61,7 @@ namespace
 
         auto resolve = [](uint32_t fileDataId) -> const char* {
             if (!fileDataId) return nullptr;
-            const char* path = wxl_wmo::ResolveTexture(fileDataId);
+            const char* path = wxl_modern_wmo::ResolveTexture(fileDataId);
             if (path && path[0]) { g_texResolved.fetch_add(1, std::memory_order_relaxed); return path; }
             g_texUnresolved.fetch_add(1, std::memory_order_relaxed);
             return nullptr;
@@ -73,17 +74,16 @@ namespace
         if (Rd32(reinterpret_cast<void*>(off::kShaderEffectsEnabled)) == 0)
             second = nullptr;
 
-        // Shader id: 3.3.5 only has effects 0..6, and its shader-effect lookup is UNCHECKED. A modern
-        // id (13, 7, 21, 12, ... on this corpus) selects past the effect table, the render path calls
-        // CShaderEffect::SetCurrent with a null effect, and the next SetShaders faults dereferencing
-        // `DAT_00D43024 + 0x2C + index*4` at a near-null address.
+        // Shader id: the client only has effects 0..6, and its shader-effect lookup is UNCHECKED. A
+        // modern id selects past the effect table, the render path binds a null effect, and the next
+        // shader bind then dereferences near a null address.
         //
         // Remap it onto the nearest native effect by combiner family (NativeShaderFor) rather than
         // flattening everything to 0: the two-layer families keep their second diffuse layer through
-        // native effect 6, so ~86% of this corpus renders with the blend the file asked for. The env
-        // reflection / emissive glow that native 5/6 cannot express is the only loss, and it is the
-        // custom-shader follow-up. The rewrite lands on the client's own working buffer, exactly like
-        // the 3/5/6 -> 4 rewrite below. Per-family counters make the trade visible in game.
+        // native effect 6, so the large majority of modern content renders with the blend the file
+        // asked for. The env reflection / emissive glow that native 5/6 cannot express is the only loss,
+        // and it is the custom-shader follow-up. The rewrite lands on the client's own working buffer,
+        // exactly like the 3/5/6 -> 4 rewrite below. Per-family counters make the trade visible in game.
         const uint32_t sourceShader = Rd32(record + off::kOffMomtShader);
         const uint32_t nativeShader =
             g_shaderRemapEnabled.load(std::memory_order_relaxed)
@@ -133,12 +133,12 @@ namespace
 namespace wxl::runtime::wmonative::detail
 {
     /**
-     * @brief Maps a modern WMO pixel-shader id onto the nearest native 3.3.5 effect (0..6).
+     * @brief Maps a modern WMO pixel-shader id onto the nearest native 335 effect (0..6).
      *
-     * 3.3.5 ships effects 0..6 (Diffuse, Specular, Metal, Env, Opaque, EnvMetal, TwoLayerDiffuse) and its
-     * effect lookup is UNCHECKED, so a modern id selects past the table and the next SetShaders faults.
-     * The modern enum is a superset built from the SAME families, and on this corpus every material is
-     * blend 0 (opaque), so a family remap keeps far more than the old collapse-to-0 did:
+     * The client ships effects 0..6 (Diffuse, Specular, Metal, Env, Opaque, EnvMetal, TwoLayerDiffuse) and
+     * its effect lookup is UNCHECKED, so a modern id selects past the table and the next shader bind
+     * faults. The modern enum is a superset built from the SAME families, and across the sampled files
+     * every material is blend 0 (opaque), so a family remap keeps far more than the old collapse-to-0 did:
      *   - two-layer families (7, 13, 15/18/19/20, 21) -> 6 TwoLayerDiffuse: the second diffuse layer,
      *     blended by vertex-colour alpha exactly as native 6 does, is preserved. The env/mod2x is dropped.
      *   - env families (11 MaskedEnvMetal, 12 EnvMetalEmissive, 17) -> 5 EnvMetal: base + env kept.
@@ -151,7 +151,7 @@ namespace wxl::runtime::wmonative::detail
     uint32_t NativeShaderFor(uint32_t modern)
     {
         if (modern <= off::kMaxClientShaderId) return modern; // already a native effect
-        // Classification taken from the Legion shader table (RE'd from the 7.3.5 Ghidra export): the
+        // Classification taken from the modern shader table: the
         // vertex shader per id decides the layer count and texcoord routing. Map each modern id onto the
         // nearest native effect of the SAME layer family so texture_1 keeps set 0 and a genuine second
         // diffuse layer keeps set 1. Getting the family right matters: id 21 is MapObjLod (SINGLE layer),
@@ -175,7 +175,6 @@ namespace wxl::runtime::wmonative::detail
 
     bool InstallMaterial()
     {
-        return wxl_wmo::HookAttach("WmoNative_CreateMaterial", off::kResolveMaterialTexture,
-                                   &hkCreateMaterial, &g_origCreateMaterial);
+        return wxl_modern_wmo::HookAttachByName("Wmo.CreateMaterial", &hkCreateMaterial, &g_origCreateMaterial);
     }
 }

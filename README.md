@@ -1,50 +1,57 @@
+<p align="center">
+  <img src="store/cover.png" alt="wxl-modern-wmo" width="640">
+</p>
+
 # wxl-modern-wmo
 
-Loads modern world map objects (WMO) in the Client by down-converting them, in memory, into the shape the
-native WMO loader reads. No files are written and no native WMO is touched.
+**Loads world map objects authored for newer versions of the game, natively.**
 
-## What it does
+A [WarcraftXL](https://github.com/WarcraftXL/wxl-core) extension. The client's WMO loader walks each
+chunk positionally, assuming a fixed order; a WMO authored later adds chunks it has no slot for, which
+desynchronizes the whole parse. This module replaces the positional walker with a tag-driven one, reads
+the file directly, and fills the client's own root/group runtime with it. No conversion step, no
+intermediate file, and root/group loads run off the main thread so loading is instant.
 
-A WMO ships as a root file (`<name>.wmo`) plus N group files (`<name>_NNN.wmo`); the client opens each one
-on its own. Modern WMOs add chunks the native loader has no slot for and encode some fields differently.
-The native loader walks chunks **positionally** (it assumes the canonical order and advances by each
-chunk's size), so an unknown chunk left in place desynchronizes the whole parse.
+See [`store/description.md`](store/description.md) for the full write-up (materials, the four-layer and
+composite shader fixes, the outdoor-visibility rule, and the interface contract).
 
-On each `.wmo` open the host decides root vs group from the chunk after `MVER` (`MOHD` = root, `MOGP` =
-group) and reshapes the bytes the host already read:
+## Highlights
 
-- **Root**: strips the source-only chunks (`GFID`/`MOUV`/`MODI`/`MOSI`), rebuilds `MOTX` (resolving any
-  texture FileDataID references), collapses the material shader family down to the Client's `0..6`, and
-  clears the runtime texture-handle bytes the Client expects zero on disk.
-- **Group**: keeps the chunks the Client knows in canonical order (synthesizing the mandatory ones when
-  absent), converts `MPY2` back to `MOPY`, relocates the `MOBA` material id and rebuilds its bounding box,
-  and **recomputes the group flags** the loader gates sub-chunk consumption on while preserving every
-  ungated bit.
+- **Direct native read**: a tag-driven chunk walker, in memory, no on-disk transform.
+- **Instant loading**: root and group walks run on a background thread; the main thread only ever checks
+  a readiness flag.
+- **Four-layer materials**: the stock single-layer shader is patched in memory to blend all four diffuse
+  layers a modern material carries, falling back to stock behavior if any prerequisite is missing.
+- **Composite overlay fix**: the second-layer blend is corrected to use the texture's own alpha instead of
+  vertex-colour alpha, scoped to modern materials only.
+- **Outdoor visibility**: recognizes the ways a modern indoor space can still show the outside (an
+  open-sided space like the underside of a bridge) and reopens the exterior the client's own way.
+- **Graceful fallback everywhere**: an unresolved texture or a shader that won't patch just draws the way
+  the client would have drawn it natively, never a crash.
 
-The transform is **data-gated** (it keys off chunk presence and field values, not a version number), so
-one path serves any source. A file already Client-shaped is served unchanged.
+## Requirements
 
-Sources that name their textures directly (a `MOTX` name table) need no resolver. Sources that reference
-textures by FileDataID rebuild the table from a resolver callback (not wired yet).
-
-## Layout
-
-- `shared/` — the byte transform, compiled into both the host and the DLL:
-  - `WmoTranslate.{hpp,cpp}` — root + group down-convert.
-  - `WmoClient.hpp` / `WmoSource.hpp` / `WmoChunks.hpp` — the Client contract, the source additions, and
-    the per-magic disposition policy.
-  - `ChunkIO.hpp` — generic IFF chunk walker.
-  - `Resolver.hpp` — the FileDataID -> path callback contract.
-- `host/WmoHost.cpp` — registers the serve-time transform and dispatches root vs group.
-
-The runtime side (defensive draw/portal/group guards that wrap the native WMO render path, and the eventual
-multi-pass overlay) lives in the engine core, not in this module — the same split the native M2 support
-uses.
+WarcraftXL on a 3.3.5a client, build 12340. The module refuses to load against anything else rather than
+guessing, and says so in the log.
 
 ## Building
 
-The transform runs host-side, so build the host alongside the DLL:
+This extension builds against [wxl-core](https://github.com/WarcraftXL/wxl-core) (branch `v1.1`), which
+auto-discovers any folder dropped into its `extensions/` directory, so there's no project file of its own
+needed here. See `.github/workflows/release.yml` for the exact steps; every push to `main` builds
+`wxl-modern-wmo.dll` and publishes it as a release.
+
+## Project layout
 
 ```
-.\build.ps1 -BuildHost
+src/
+├── ExtensionApi.hpp/.cpp, Module.cpp   entry points, service-table plumbing
+├── load/                               the native chunk walkers, background root/group loading,
+│                                       material resolution, vertex-colour contract
+└── render/                             the four-layer material, the composite overlay fix, and the
+                                        outdoor-visibility rule
 ```
+
+## License
+
+GPL-3.0-or-later. See the license header in every source file.

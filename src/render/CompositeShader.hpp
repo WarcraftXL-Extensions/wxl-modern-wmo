@@ -19,16 +19,16 @@
 #include <cstdint>
 
 /**
- * @brief Read-only query surface of the modern-WMO Composite pixel-shader fix (features/wmonative).
+ * @brief Read-only query surface of the modern-WMO Composite pixel-shader fix
  *
  * A modern WMO material's second texture is an alpha-masked DETAIL OVERLAY (edge highlights, panel
- * lines): measured 62-92% transparent across the corpus, meant to be composited over the base layer by
- * its OWN alpha. 3.3.5's two-layer effect (MapObjComposite, effect id 6) blends the two layers by the
+ * lines): measured 62-92% transparent across the sampled files, meant to be composited over the base
+ * layer by its OWN alpha. The client's two-layer effect (MapObjComposite, effect id 6) blends the two layers by the
  * SECONDARY VERTEX-COLOUR alpha instead (`lrp r2, v1.w, r0, r1`), ignoring the texture alpha -- so it
  * mixes in the overlay's dark body and its highlight lines render as dark stripes.
  *
- * The fix patches the stock Composite pixel shader IN MEMORY -- exactly like features/adtsplit height
- * blend: the wrapper's bytecode is read out, D3DDisassemble'd, the one blend instruction is rewritten to
+ * The fix patches the stock Composite pixel shader IN MEMORY -- the same technique the terrain height
+ * blend uses: the wrapper's bytecode is read out, D3DDisassemble'd, the one blend instruction is rewritten to
  * `lrp <d>, <tex2>.w, <tex2>, <tex1>` = lerp(tex1, tex2, tex2.a), reassembled, and swapped into GxState
  * slot 0x4E for the draw. No .bls file is produced or replaced. The swap is scoped to MODERN WMOs (stock
  * two-layer WMOs still want the vertex-alpha blend): two thin frame-stash hooks on the WMO batch-draw
@@ -46,7 +46,7 @@ namespace wxl::runtime::wmocomposite
 
     Stats GetStats();
 
-    /** @brief True when the feature is compiled in (wxl_wmo::kEnabled). */
+    /** @brief True when the feature is compiled in (wxl_modern_wmo::kEnabled). */
     bool Enabled();
 
     /** @brief True once both leaf hooks and the effect-bind hook installed. */

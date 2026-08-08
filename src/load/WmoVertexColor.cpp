@@ -21,14 +21,13 @@
 
 #include <atomic>
 #include <cstdint>
-#include <cstring>
 
 namespace off = wxl::offsets::game::wmo;
 
 namespace wxl::runtime::wmonative::detail
 {
     /// Load-time MOCV alpha contract of a modern group (root sets MOHD 0x08, do_not_fix_vertex_color
-    /// _alpha -- the whole modern corpus). The modern engine ships MOCV RGB raw and rewrites ONLY the
+    /// _alpha -- every modern file observed). The modern engine ships MOCV RGB raw and rewrites ONLY the
     /// alpha at load: opaque for an exterior group, zero for an interior one, past the trans-batch
     /// vertex range. Trans-range alpha keeps its authored value -- it weights this client's own
     /// two-pass interior/exterior cross-fade.
@@ -48,16 +47,12 @@ namespace wxl::runtime::wmonative::detail
 
         // First vertex past the trans batches (the head of the shared vertex range).
         uint32_t transEnd = 0;
-        auto* batches = static_cast<uint8_t*>(GetPtr(group, off::kGroupSlots[5].ptrField));
+        auto* batches = static_cast<off::MobaRecord*>(GetPtr(group, off::kGroupSlots[5].ptrField));
         const uint32_t batchCount = Rd32(Field(group, off::kGroupSlots[5].countField));
-        uint16_t transBatches = 0;
-        std::memcpy(&transBatches, Field(group, off::kOffGroupTransBatchCount), 2);
+        const uint16_t transBatches = static_cast<off::Group*>(group)->transBatchCount;
         if (batches && transBatches != 0 && transBatches <= batchCount)
         {
-            uint16_t maxIndex = 0;
-            std::memcpy(&maxIndex,
-                        batches + (static_cast<size_t>(transBatches) - 1) * off::kMobaStride +
-                            off::kOffMobaMaxIndex, 2);
+            const uint16_t maxIndex = batches[transBatches - 1].maxIndex;
             transEnd = static_cast<uint32_t>(maxIndex) + 1;
             if (transEnd > count) transEnd = count;
         }
@@ -77,12 +72,12 @@ namespace wxl::runtime::wmonative::detail
         if (!GetPtr(group, off::kGroupSlots[8].ptrField))
             return; // no MOCV in this group
 
-        void* root = GetPtr(group, off::kOffGroupRoot);
+        void* root = static_cast<off::Group*>(group)->root;
         auto* mohd = root ? static_cast<uint8_t*>(GetPtr(root, off::kOffMohd)) : nullptr;
         const uint32_t mohdFlags = mohd ? Rd32(mohd + off::kOffMohdFlags) : 0;
         if (mohdFlags & off::kMohdFlagSkipColorFix)
         {
-            NormalizeVertexColorAlpha(group, Rd32(Field(group, off::kOffGroupFlags)));
+            NormalizeVertexColorAlpha(group, static_cast<off::Group*>(group)->flags);
         }
         else
         {

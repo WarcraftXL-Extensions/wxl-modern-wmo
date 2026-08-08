@@ -19,18 +19,18 @@
 #include <cstdint>
 
 /**
- * @brief Feature-internal entry points of the four-layer material draw path (features/wmonative).
+ * @brief Feature-internal entry points of the four-layer material draw path
  *
  * A modern four-layer material blends four diffuse layers, each sampled at its OWN UV set (layer i =
  * set i, positional), weighted per vertex by a dedicated weight chunk modulated by per-layer height
  * maps, then tinted toward a per-material colour by the weight alpha. The runtime here reproduces that
- * contract on the 3.3.5 pipeline:
+ * contract on the client's pipeline:
  *   - the loader (WmoNative) serves the four UV sets + weights and the nine texture ids per material;
  *   - at batch bind, the stock single-layer VS/PS pair the client chose is patched in memory (the VS
  *     gains pass-through outputs for the extra UV sets + weights, the PS's single diffuse fetch becomes
  *     the four-layer height blend + tint) and swapped into the GxState shader slots; the extra layer
  *     textures are bound through the engine's own texture states;
- *   - the draw itself is wrapped once (wxl-m2's one-shot interceptor, published as wxl.m2draw) to attach
+ *   - the draw itself is wrapped once (wxl-modern-m2's one-shot interceptor, published as wxl.m2draw) to attach
  *     a second vertex stream carrying the UV sets + weights, with every touched device state restored
  *     right after.
  * Everything the client's own lighting/fog path computes is kept: only the texel that feeds it changes.

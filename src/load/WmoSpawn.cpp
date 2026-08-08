@@ -1,4 +1,4 @@
-// CMapObj spawn / root-complete detours: apply the per-instance MODF scale, publish OnWmoRootLoad.
+// Map-object spawn / root-complete detours: apply the per-instance MODF scale, publish OnWmoRootLoad.
 // Copyright (C) 2026 WarcraftXL
 //
 // This program is free software: you can redistribute it and/or modify
@@ -14,9 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-#include "ExtensionApi.hpp"
-
-#include "engine/events/Event.hpp"
+#include "../ExtensionApi.hpp"
+#include "WmoNativeShared.hpp"
 
 #include "offsets/game/WMO.hpp"
 
@@ -24,7 +23,6 @@
 
 namespace
 {
-    namespace ev  = wxl::events;
     namespace wmo = wxl::offsets::game::wmo;
 
     wmo::Wmo_SpawnFromModfFn g_origWmoSpawn = nullptr;
@@ -48,21 +46,22 @@ namespace
      * A correctly selected WMO stays silent.
      * @param inst  freshly spawned WMO instance.
      */
-    void DiagDoodadSets(void* inst)
+    void DiagDoodadSets(void* instRaw)
     {
-        auto* root = *reinterpret_cast<void**>(static_cast<uint8_t*>(inst) + wmo::kOffInstanceRoot);
+        auto* inst = static_cast<wmo::Instance*>(instRaw);
+        auto* root = reinterpret_cast<uint8_t*>(inst->root);
         if (!root)
             return;
-        const uint32_t nSets = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(root) + wmo::kOffRootDoodadSets);
+        const uint32_t nSets = *reinterpret_cast<uint32_t*>(root + wmo::kOffRootDoodadSets);
         if (nSets < 2)
             return; // a single-set WMO cannot show "extra" sets
-        const uint8_t* mods = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(root) + wmo::kOffRootMods);
+        const uint8_t* mods = *reinterpret_cast<uint8_t**>(root + wmo::kOffRootMods);
         if (!mods)
             return;
-        const uint32_t nDefs = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(root) + wmo::kOffRootDoodadDefs);
-        const uint32_t sel   = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(inst) + wmo::kOffInstanceDoodadSet);
-        const uint16_t* extra = reinterpret_cast<uint16_t*>(static_cast<uint8_t*>(inst) + wmo::kOffInstanceExtraSets);
-        const char* name = reinterpret_cast<const char*>(static_cast<uint8_t*>(root) + wmo::kOffNameInline);
+        const uint32_t nDefs = *reinterpret_cast<uint32_t*>(root + wmo::kOffRootDoodadDefs);
+        const uint32_t sel    = inst->doodadSet;
+        const uint16_t* extra = inst->extraSets;
+        const char* name = reinterpret_cast<const wmo::Root*>(root)->nameInline;
         const uint32_t s0count = *reinterpret_cast<const uint32_t*>(mods + wmo::kOffModsCount);
 
         const bool greedy0  = nDefs && s0count + 1 >= nDefs;    // set 0 covers (almost) every def
@@ -113,7 +112,8 @@ namespace
             return inst; // native / unscaled: leave the instance byte-for-byte
         const float s = static_cast<float>(raw) / 1024.0f;
 
-        float* render = reinterpret_cast<float*>(static_cast<uint8_t*>(inst) + wmo::kOffInstanceRenderMatrix);
+        auto* instance = static_cast<wmo::Instance*>(inst);
+        float* render = instance->renderMatrix;
         const float len2 = render[0] * render[0] + render[1] * render[1] + render[2] * render[2];
         if (len2 < 0.9999f || len2 > 1.0001f)
             return inst; // already scaled (a dedup hit returned an existing instance)
@@ -121,35 +121,36 @@ namespace
         ScaleMatrixRows3x3(render, s);
 
         // The transposed collision/portal basis is an INVERSE rotation, so it takes 1/s (see above).
-        if constexpr (wxl_wmo::kEnabled)
-        {
-            float* collision = reinterpret_cast<float*>(static_cast<uint8_t*>(inst) + wmo::kOffInstanceCollisionMatrix);
-            ScaleMatrixRows3x3(collision, 1.0f / s);
-        }
+        if constexpr (wxl_modern_wmo::kEnabled)
+            ScaleMatrixRows3x3(instance->collisionMatrix, 1.0f / s);
         return inst;
     }
 
     /**
-     * @brief Detours WMO root read-completion, emitting OnWmoRootLoad before the native chunk walk.
+     * @brief Detours WMO root read-completion: hands off to WmoAsync's SubmitRootComplete, which owns
+     *        both the OnWmoRootLoad emission and the classify/background-submit decision.
      *
-     * Fires once after the async read fills the root buffer and before the walker runs, so a subscriber
-     * may reshape the root buffer in place; the native walk then reads the reshaped bytes.
+     * OnWmoRootLoad fires once after the async read fills the root buffer and before the walker runs, so
+     * a subscriber may reshape the root buffer in place; the native walk then reads the reshaped bytes.
+     * The emission itself lives in SubmitRootComplete now, not here -- it must run AFTER that function
+     * arms this root's background-walk gate (if it decides to background it) and before anything else,
+     * so a reentrant WaitLoad/WaitLoadGroup call during event dispatch resolves through wxl's own gate
+     * instead of falling through to a native wait unsafe to call this early (see SubmitRootComplete's own
+     * doc comment in WmoAsync.cpp).
      * @param root  map-object root whose buffer was just read.
      */
     void __cdecl hkWmoRootComplete(void* root)
     {
-        ev::WmoRootLoadArgs a{ root };
-        wxl_wmo::g_api->Emit(uint32_t(ev::Event::OnWmoRootLoad), &a);
-        g_origWmoRoot(root);
+        wxl::runtime::wmonative::detail::SubmitRootComplete(root, g_origWmoRoot);
     }
 }
 
-namespace wxl_wmo
+namespace wxl_modern_wmo
 {
     bool InstallWmoSpawn()
     {
-        HookAttach("WmoSpawn", wmo::kSpawnFromModf, &hkWmoSpawn, &g_origWmoSpawn);
-        HookAttach("WmoRootComplete", wmo::kRootComplete, &hkWmoRootComplete, &g_origWmoRoot);
+        HookAttachByName("Wmo.SpawnFromModf", &hkWmoSpawn, &g_origWmoSpawn);
+        HookAttachByName("Wmo.RootComplete", &hkWmoRootComplete, &g_origWmoRoot);
         return true;
     }
 }

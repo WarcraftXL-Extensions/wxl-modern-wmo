@@ -83,7 +83,7 @@ namespace wxl::runtime::wmonative
         return s;
     }
 
-    bool Enabled() { return wxl_wmo::kEnabled; }
+    bool Enabled() { return wxl_modern_wmo::kEnabled; }
 
     bool Installed() { return detail::g_installed.load(std::memory_order_relaxed); }
 
@@ -119,9 +119,10 @@ namespace wxl::runtime::wmonative
     }
 
     const void* CurrentBatch() { return detail::g_curBatch; }
+    void ClearCurrentBatch() { detail::g_curBatch = nullptr; }
 }
 
-namespace wxl_wmo
+namespace wxl_modern_wmo
 {
     bool InstallWmoNative()
     {

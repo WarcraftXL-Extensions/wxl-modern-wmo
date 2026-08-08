@@ -19,9 +19,9 @@
 #include <cstdint>
 
 /**
- * @brief Read-only query surface of the native modern-WMO reader (features/wmonative).
+ * @brief Read-only query surface of the native modern-WMO reader
  *
- * The 3.3.5 root and group chunk walkers are POSITIONAL: they skip MVER blind, then consume a fixed
+ * The client's root and group chunk walkers are POSITIONAL: they skip MVER blind, then consume a fixed
  * sequence of chunks, storing a content pointer and a count derived from `chunkSize / stride`, without
  * ever comparing a FourCC (the sole exception is the optional trailing MCVP). They also carry no bounds
  * check, no validation and no early return, so a modern root -- which drops MOTX/MODN/MOSB/MOVV/MOVB and
@@ -29,7 +29,7 @@
  *
  * This feature replaces the three walkers with tag-driven ones that write exactly the same runtime
  * fields, so a modern WMO is read WHERE IT LIES: no chunk is reordered, no buffer is rebuilt, no
- * "3.3.5-shaped" file is synthesized. A stock WMO is classified in one cheap pass and handed to the
+ * client-shaped file is synthesized. A stock WMO is classified in one cheap pass and handed to the
  * untouched original walker, so mixed scenes stay correct.
  *
  * Faithfulness note: the stock loader itself writes into the loaded file buffer (MOGI sky-flag clear,
@@ -49,7 +49,7 @@ namespace wxl::runtime::wmonative
         uint32_t texturesUnresolved; ///< MOMT texture FileDataIDs the DB2 authority could not resolve
         uint32_t parkedDoodadDefs;   ///< roots whose MODD was parked (MODI index form, no MODN blob)
         uint32_t parkedLiquids;      ///< groups whose MLIQ was parked (modern liquid ids crash the client)
-        uint32_t parkedIndex32;      ///< groups carrying MOVX (32-bit indices) with no 3.3.5 home
+        uint32_t parkedIndex32;      ///< groups carrying MOVX (32-bit indices) with no 335 home
         uint32_t unknownChunks;      ///< modern-only chunks seen and skipped (GFID, MGI2, MNLD, ...)
         /// Materials whose modern shader id was remapped onto the nearest native effect (0..6) by
         /// combiner family, split by target below. The env reflection / emissive glow that native 5/6
@@ -70,7 +70,7 @@ namespace wxl::runtime::wmonative
         uint32_t batchCullBypassed;
         /// Modern groups whose MOCV took the stock CPU vertex-colour fix because their root clears the
         /// MOHD do_not_fix flag (the legacy contract, honoured exactly as the stock walker does). Groups
-        /// under a root that SETS the flag -- the whole modern corpus -- instead get the modern alpha-only
+        /// under a root that SETS the flag -- every modern file observed -- instead get the modern alpha-only
         /// rewrite (opaque exterior / zero interior past the trans range, RGB shipped raw), unconditionally.
         uint32_t vertexColorFixed;
         uint32_t uvTransformed; ///< groups whose UV set was transformed by the experimental UvMode probe
@@ -84,7 +84,7 @@ namespace wxl::runtime::wmonative
     /** @brief Returns a snapshot of the session counters. */
     Stats GetStats();
 
-    /** @brief True when the native reader is compiled in (wxl_wmo::kEnabled). */
+    /** @brief True when the native reader is compiled in (wxl_modern_wmo::kEnabled). */
     bool Enabled();
 
     /** @brief True when every walker detour installed; false leaves the client fully stock. */
@@ -105,7 +105,7 @@ namespace wxl::runtime::wmonative
      * @brief EXPERIMENTAL UV-orientation probe. 0 = untouched; 1 swap u/v; 2 rot+90; 3 rot-90; 4 flip v;
      *        5 flip u; 6 feed the second UV set to the base texture. Applied at group load, so a change
      *        takes effect on the next (re)load of a WMO -- walk away and back. Finds the transform that
-     *        de-rotates modern WMO textures empirically before it is made permanent / RE-confirmed.
+     *        de-rotates modern WMO textures empirically before it is made permanent.
      */
     int  UvMode();
     void SetUvMode(int mode);
@@ -158,7 +158,23 @@ namespace wxl::runtime::wmonative
     /** @brief Material index of one batch record (modern u16 form or the stock byte). */
     uint32_t BatchMaterialIndex(const void* mobaRecord);
 
-    /** @brief The batch record most recently kept by the per-batch cull on a modern leaf (the one the
-     *  following effect bind belongs to). Null before any modern batch. Render thread only. */
+    /**
+     * @brief The batch record most recently kept by the per-batch cull on a modern leaf (the one the
+     *        immediately following effect bind belongs to). Null before any modern batch, or once
+     *        consumed -- see ClearCurrentBatch(). Render thread only.
+     */
     const void* CurrentBatch();
+
+    /**
+     * @brief Consumes the CurrentBatch() latch (sets it back to null).
+     *
+     * MUST be called by whatever effect-bind reads CurrentBatch(), immediately after reading it,
+     * whether or not the value turned out to be usable. The cull hook that sets it (hkCullBatch) has no
+     * way to know which later effect-bind call, if any, is really "the one that follows" -- an ordinary
+     * single-layer bind for an unrelated batch (or root, even a since-unloaded one) can occur first, and
+     * would otherwise silently act on a stale, potentially dangling pointer instead of finding no batch
+     * armed. Confirmed off a real crash dump: an un-consumed latch surviving across a WMO group
+     * unload during a load burst (e.g. a zone reconnect) reads freed memory.
+     */
+    void ClearCurrentBatch();
 }

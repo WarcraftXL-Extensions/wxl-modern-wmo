@@ -1,4 +1,4 @@
-// wxl-wmo: native modern-WMO reader (tag-driven chunk walkers, material/shader remap, outdoor gate,
+// wxl-modern-wmo: native modern-WMO reader (tag-driven chunk walkers, material/shader remap, outdoor gate,
 // composite/layered shader fixes), as an out-of-core extension. Entry point.
 // Copyright (C) 2026 WarcraftXL
 //
@@ -22,7 +22,7 @@ const WXL_PluginInfo* __cdecl WXL_Query(void)
     static const WXL_PluginInfo info = {
         sizeof(WXL_PluginInfo),
         WXL_API_VERSION,
-        "wxl-wmo",
+        "wxl-modern-wmo",
         1,
         WXL_CLIENT_BUILD,
     };
@@ -33,20 +33,21 @@ int __cdecl WXL_Load(const WXL_Api* api)
 {
     if (!api || api->apiVersion != WXL_API_VERSION) return 0;
 
-    wxl_wmo::g_api = api;
+    wxl_modern_wmo::g_api = api;
 
     // wmo-spawn and wmo-group-parse are unconditional (publish OnWmoRootLoad/OnWmoGroupLoad regardless
     // of kEnabled -- always were, even back when these were core WXL_REGISTER_FEATURE("...", true, ...)).
-    wxl_wmo::InstallWmoSpawn();
-    wxl_wmo::InstallWmoGroupParse();
+    wxl_modern_wmo::InstallWmoSpawn();
+    wxl_modern_wmo::InstallWmoGroupParse();
 
-    if constexpr (wxl_wmo::kEnabled)
+    if constexpr (wxl_modern_wmo::kEnabled)
     {
-        wxl_wmo::InstallWmoNative();
-        wxl_wmo::InstallOutdoorGate();
-        wxl_wmo::InstallCompositeShader();
+        wxl_modern_wmo::InstallWmoNative();
+        wxl_modern_wmo::InstallWmoAsync();
+        wxl_modern_wmo::InstallOutdoorGate();
+        wxl_modern_wmo::InstallCompositeShader();
     }
 
-    api->Log(WXL_LOG_INFO, "wxl-wmo", "native modern-WMO reader active");
+    api->Log(WXL_LOG_INFO, "wxl-modern-wmo", "native modern-WMO reader active");
     return 1;
 }

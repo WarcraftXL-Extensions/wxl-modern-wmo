@@ -21,7 +21,7 @@
 // and the telemetry counters -- has internal linkage no single translation unit can own, so it is
 // declared here (defined once in WmoState.cpp) and the raw-memory helpers every walker needs are inline.
 
-#include "ExtensionApi.hpp"
+#include "../ExtensionApi.hpp"
 #include "WmoNative.hpp"
 
 #include <atomic>
@@ -106,8 +106,11 @@ namespace wxl::runtime::wmonative::detail
     extern std::atomic<int>      g_uvMode;
 
     // ------------------------------------------------------------------ shared runtime state
-    /// The batch record last kept by the per-batch cull on a modern leaf (the batch the following effect
-    /// bind belongs to). Render is single-threaded, so a plain pointer is enough.
+    /// One-shot latch: the batch record last kept by the per-batch cull on a modern leaf. Render is
+    /// single-threaded, so a plain pointer is enough for the value itself, but the *lifetime* is not
+    /// implicit -- wxl::runtime::wmonative::CurrentBatch()/ClearCurrentBatch() is the consume contract
+    /// every reader must follow (see ClearCurrentBatch()'s doc comment); do not read this global
+    /// directly.
     extern const void* g_curBatch;
 
     /// Modern verdict per root object. Rewritten on every root load, so a recycled pool slot never
@@ -127,7 +130,7 @@ namespace wxl::runtime::wmonative::detail
     void DropLayeredGroup(void* group);
 
     // ------------------------------------------------------------------ cross-unit responsibilities
-    /// WmoMaterial: maps a modern WMO pixel-shader id onto the nearest native 3.3.5 effect (0..6).
+    /// WmoMaterial: maps a modern WMO pixel-shader id onto the nearest native 335 effect (0..6).
     uint32_t NativeShaderFor(uint32_t modern);
     /// WmoVertexColor: reproduces the modern MOCV alpha contract past the trans-batch vertex range.
     void NormalizeVertexColorAlpha(void* group, uint32_t groupFlags);
@@ -139,4 +142,61 @@ namespace wxl::runtime::wmonative::detail
     bool InstallGroupWalk();  // WmoLoad
     bool InstallCull();       // WmoLoad
     bool InstallMaterial();   // WmoMaterial
+
+    // ------------------------------------------------------------------ background walk orchestration
+    // WmoAsync.cpp submits WalkRootModern/WalkGroupModern (below) to wxl.loadpool, exactly as wxl-adt
+    // backgrounds ParseAndPatch. Unlike ADT, the split point has to sit ABOVE the walker (at the
+    // completion callback, before the native handle at root+0x1DC/group+0x194 is cleared), because the
+    // walker call and the rest of the native finalize (materials, MOHD copy, group allocation / GPU
+    // texture binds, antiportal, bbox) are fused into ONE native function with no clean call boundary --
+    // there is no ADT-style separately-callable "TileAreaCreate" to invoke once ready. So stage2 does not
+    // reproduce that remainder by hand: it simply lets the ORIGINAL, unmodified completion callback run,
+    // and WalkRootModern/WalkGroupModern's own hook (hkRootWalk/hkGroupWalk) becomes a one-shot no-op for
+    // an object stage1 already walked, so the native call reaches its own remainder exactly as it always
+    // has -- adapt native's own code by resuming it, never re-implement it.
+
+    // WalkRootModern/WalkGroupModern themselves, exposed from WmoLoad.cpp so WmoAsync.cpp's background
+    // stage1 can call them directly (bypassing the hooks, which are the RESUME point, not the trigger).
+    // Both are SEH-guarded internally; a fault classifies as "walk failed", never a crash.
+    bool ClassifyRootBuffer(uint8_t* base, uint32_t size);
+    void WalkModernRoot(void* root);                  // caller must already know the root is modern
+    void WalkModernGroup(void* group, void* cursor);  // caller must already know the root is modern
+
+    // Consumed by hkRootWalk/hkGroupWalk: true (and clears the marker) exactly once per background walk
+    // that already ran for this object -- the hook must skip its own work and return immediately, letting
+    // the native caller's remainder run against the fields stage1 already populated. False for every
+    // other call (stock objects, or an object never submitted through Submit*Complete below).
+    bool TakePrewalkedRoot(void* root);
+    bool TakePrewalkedGroup(void* group);
+
+    using RootFinalizeFn  = void(__cdecl*)(void* root);
+    using GroupFinalizeFn = void(__cdecl*)(void* group);
+
+    /// Classifies `root`; a stock root finalizes synchronously and immediately (calls `finalize(root)`
+    /// before returning -- byte-for-byte today's behaviour). A modern root's walk is submitted to
+    /// wxl.loadpool (or run inline if the pool is unavailable/disabled): stage1 populates the root's
+    /// fields directly and arms TakePrewalkedRoot's one-shot marker; stage2 then calls `finalize` -- the
+    /// TRUE, unmodified native completion -- which clears the native async handle, runs CreateData (whose
+    /// own call into the walker now no-ops), and does the rest of native's own root finalize exactly as
+    /// it always has. Call from the root's completion-callback hook, BEFORE the native completion (which
+    /// would clear root+0x1DC) is allowed to run.
+    void SubmitRootComplete(void* root, RootFinalizeFn finalize);
+    /// Same shape as SubmitRootComplete, for one group.
+    void SubmitGroupComplete(void* group, GroupFinalizeFn finalize);
+
+    /// True while `root` has a background walk (stage1) ACTIVELY RUNNING on a worker thread right now --
+    /// deliberately narrower than "any job outstanding": stage1 is the only phase that writes the fields
+    /// UpdateMaterials reads (root+0x19C/root+0x160), so once it finishes those fields are stable even
+    /// if stage2 (the deferred native finalize) hasn't run yet. Used by UpdateMaterials' torn-read guard,
+    /// which must SKIP -- never block, it runs every frame for every tracked root -- rather than wait.
+    ///
+    /// Deliberately NOT exposed as a general "wait for everything" primitive: the destructor and
+    /// WaitLoad detours (WmoAsync.cpp) need different, incompatible behaviour once stage1 is done --
+    /// the destructor must CANCEL a still-pending stage2 (the root is about to be freed), WaitLoad must
+    /// RUN it right now on the calling thread if the pool hasn't drained it yet (blocking on stage2
+    /// itself would deadlock: stage2 only ever runs on the main thread, the same thread every WaitLoad
+    /// caller is on) -- so that logic lives inline in WmoAsync.cpp's own hook bodies, not here.
+    bool IsRootPending(void* root);
+
+    bool InstallAsync(); // WmoAsync
 }

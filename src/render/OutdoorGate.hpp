@@ -1,4 +1,4 @@
-// Legion's exterior re-enable rule, added to the 3.3.5 indoor/outdoor gate.
+// The modern exterior re-enable rule, added to the client's indoor/outdoor gate.
 // Copyright (C) 2026 WarcraftXL
 //
 // This program is free software: you can redistribute it and/or modify
@@ -19,17 +19,17 @@
 #include <cstdint>
 
 /**
- * @brief Read-only query surface of the outdoor-gate rule (features/wmonative/OutdoorGate).
+ * @brief Read-only query surface of the outdoor-gate rule.
  *
  * Both engines suppress the exterior pass while the viewer is inside a map-object group -- that part
  * is identical, and so is the indoor test itself (a BSP raycast straight down from the camera, with the
  * same disqualifying mask). What differs is how the exterior gets turned back ON.
  *
- * 3.3.5 has exactly one way: cross a portal into an exterior group. Legion adds three more, and the one
- * that matters here is "the group is indoor AND has transition batches": an open-sided interior such as
- * the underside of a bridge or an archway keeps the world visible. Measured on the active corpus, that
- * holds for 37 of the 94 indoor groups -- every one of them a place where walking in makes half the
- * terrain vanish on 3.3.5 and nothing happen on Legion.
+ * The client has exactly one way: cross a portal into an exterior group. Modern content adds three more,
+ * and the one that matters here is "the group is indoor AND has transition batches": an open-sided
+ * interior such as the underside of a bridge or an archway keeps the world visible. Measured across the
+ * sampled files, that holds for roughly two in five indoor groups -- every one of them a place where
+ * walking in makes half the terrain vanish on the client and nothing happen in the modern original.
  *
  * The rule is added to the client, not written into the files: the gate is a plain float compared
  * against zero, so raising it in a post-hook of the portal traversal makes the client take its own
@@ -43,10 +43,10 @@ namespace wxl::runtime::wmooutdoor
         uint32_t framesReopened;    ///< frames the exterior was re-enabled by the added rule
         uint32_t framesPortalOpen;  ///< frames stock portal traversal had already re-enabled it
         uint32_t groupResolveFails; ///< frames the viewer group could not be resolved (rule skipped)
-        /// Modern "antiportal" groups whose CPU occluders were NOT built. 3.3.5 feeds occluders to an
-        /// angular clip buffer with no depth, while modern antiportals are authored for Legion's hi-Z
-        /// occlusion buffer -- the bridge's is a 173 x 48 unit slab, which head-on erases the world
-        /// behind it and from the side does nothing.
+        /// Modern "antiportal" groups whose CPU occluders were NOT built. The client feeds occluders to an
+        /// angular clip buffer with no depth, while modern antiportals are authored for a hi-Z occlusion
+        /// buffer -- the bridge's is a 173 x 48 unit slab, which head-on erases the world behind it and
+        /// from the side does nothing.
         uint32_t occludersSkipped;
         uint32_t occludersBuilt;    ///< antiportal groups that kept their stock occluders (stock WMOs)
         uint32_t undersideEdges;    ///< occluder edges whose underside was projected into the band
@@ -55,7 +55,7 @@ namespace wxl::runtime::wmooutdoor
 
     Stats GetStats();
 
-    /** @brief True when the feature is compiled in (wxl_wmo::kEnabled). */
+    /** @brief True when the feature is compiled in (wxl_modern_wmo::kEnabled). */
     bool Enabled();
 
     /** @brief True once both detours installed; false leaves the stock gate untouched. */
@@ -72,7 +72,7 @@ namespace wxl::runtime::wmooutdoor
     /**
      * @brief The real fix: give the client's occlusion skyline a lower bound.
      *
-     * 3.3.5 stores, per azimuth, the highest occluded elevation, and culls anything whose top sits
+     * The client stores, per azimuth, the highest occluded elevation, and culls anything whose top sits
      * below it -- a model that assumes the occluder is a wall reaching the ground. A modern antiportal
      * is often a floating slab (a bridge deck), so everything visible underneath gets culled too. With
      * this on, the same edges are also projected at the group's floor into a second table, and a box

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "ExtensionApi.hpp"
+#include "../ExtensionApi.hpp"
 
 #include "game/Gx.hpp"
 #include "offsets/engine/Shader.hpp"
@@ -32,7 +32,7 @@
 /// Feature-private toolbox for the disassemble -> edit -> reassemble -> wrap pipeline the WMO material
 /// fixes share. A patched shader never touches a .bls file: the stock wrapper's bytecode is read out,
 /// rewritten as text, reassembled on the live device, and the new bytecode is minted into a minimal
-/// CGxShader-layout wrapper the GxState flush can bind (live handle + created flag + bytecode fields).
+/// GPU-shader-layout wrapper the GxState flush can bind (live handle + created flag + bytecode fields).
 namespace wxl::features::wmoshader
 {
     // D3DAssemble has no SDK header declaration; both are resolved by name from the delay-loadable
@@ -81,7 +81,7 @@ namespace wxl::features::wmoshader
     }
 
     /**
-     * @brief Wraps freshly created device bytecode in the minimal CGxShader layout the GxState shader
+     * @brief Wraps freshly created device bytecode in the minimal GPU-shader layout the GxState shader
      *        flush reads: live handle +0x20, created flag +0x30, bytecode ptr/len +0x50/+0x4C.
      * @param bytecode  assembled shader bytecode (copied; the caller may release its blob).
      * @param len       bytecode byte length.

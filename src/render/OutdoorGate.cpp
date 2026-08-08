@@ -1,4 +1,4 @@
-// Legion's exterior re-enable rule, added to the 3.3.5 indoor/outdoor gate.
+// The modern exterior re-enable rule, added to the client's indoor/outdoor gate.
 // Copyright (C) 2026 WarcraftXL
 //
 // This program is free software: you can redistribute it and/or modify
@@ -16,19 +16,19 @@
 
 // MECHANISM
 //
-//   The gate    CWorldScene::Render suppresses the exterior while the viewer is inside a map object.
+//   The gate    The world-scene render suppresses the exterior while the viewer is inside a map object.
 //               At 0x0079AA22 it runs the interior portal traversal, then tests one float:
 //                   fld dword [0x00ADF59C] ; fcom 0.0 ; ...
 //               negative -> no exterior at all; zero or above -> the exterior pass runs, clipped to the
 //               rect at 0x00ADF58C that portal traversal accumulated. The indoor branch seeds that rect
 //               EMPTY and the gate at -1; only a portal into an exterior group raises it.
 //
-//   The delta   Legion suppresses the exterior in exactly the same way, and decides "the viewer is
-//               indoors" with the same downward BSP raycast and the same disqualifying mask. What it
-//               adds are three further ways to turn the exterior back on (FUN_00CB5FEC). On the active
-//               corpus only one of them ever fires: an indoor group that has TRANSITION BATCHES, i.e.
-//               an interior open to the sky -- a bridge underside, an archway, a porch. 37 of the 94
-//               indoor groups here qualify, and each is a spot where 3.3.5 blanks half the terrain.
+//   The delta   Modern content suppresses the exterior in exactly the same way, and decides "the viewer
+//               is indoors" with the same downward BSP raycast and the same disqualifying mask. What it
+//               adds are three further ways to turn the exterior back on. Across the sampled files only
+//               one of them ever fires: an indoor group that has TRANSITION BATCHES, i.e. an interior
+//               open to the sky -- a bridge underside, an archway, a porch. Roughly two in five indoor
+//               groups qualify, and each is a spot where the client blanks half the terrain.
 //
 //   The fix     Post-hook the traversal and, when the rule applies, write the same five floats the
 //               engine's own OUTDOOR branch writes: a full 0..1 screen rect and a zero gate. The
@@ -36,9 +36,9 @@
 //               touched, and the stock portal rule keeps priority -- if traversal already opened the
 //               exterior, its accumulated rect is left exactly as it is.
 
-#include "ExtensionApi.hpp"
+#include "../ExtensionApi.hpp"
 #include "OutdoorGate.hpp"
-#include "WmoNative.hpp"
+#include "../load/WmoNative.hpp"
 
 #include "offsets/game/WMO.hpp"
 
@@ -66,14 +66,11 @@ namespace
     /// Clears the per-frame antiportal underside table (defined with the occluder rule below).
     void ResetUnderside();
 
-    /// The group the viewer is inside, as reported by the last CMap::LocateViewerMapObjs of this frame.
+    /// The group the viewer is inside, as reported by the last viewer-locate query of this frame.
     /// Whether the engine hands back a group OBJECT or a group INDEX is resolved defensively below, so
     /// the rule works either way and says so in the log the first time it decides.
     std::atomic<void*> g_viewerGroupRaw{nullptr};
     std::atomic<bool>  g_reportedGroupForm{false};
-
-    inline uint32_t Rd32(const void* p) { uint32_t v; std::memcpy(&v, p, 4); return v; }
-    inline uint16_t Rd16(const void* p) { uint16_t v; std::memcpy(&v, p, 2); return v; }
 
     inline float OutdoorGate() { return *reinterpret_cast<const float*>(off::kOutdoorEnabled); }
 
@@ -101,20 +98,20 @@ namespace
         if (!raw || !instance)
             return nullptr;
 
-        void* root = *reinterpret_cast<void**>(static_cast<uint8_t*>(instance) + off::kOffInstanceRoot);
+        void* root = reinterpret_cast<void*>(static_cast<off::Instance*>(instance)->root);
         if (!root)
             return nullptr;
 
         const uintptr_t value = reinterpret_cast<uintptr_t>(raw);
-        const uint32_t groupCount = Rd32(static_cast<uint8_t*>(root) + off::kOffGroupCount);
+        auto* rootObj = static_cast<off::Root*>(root);
+        const uint32_t groupCount = rootObj->groupCount;
 
         // Small value -> a group index into the root's inline array.
         if (value < 0x10000)
         {
             if (value >= groupCount)
                 return nullptr;
-            auto* slot = reinterpret_cast<void**>(static_cast<uint8_t*>(root) + off::kOffGroupArray);
-            void* group = slot[value];
+            void* group = rootObj->groupArray[value];
             if (!g_reportedGroupForm.exchange(true, std::memory_order_relaxed))
                 WLOG_INFO("wmo-outdoor: viewer group reported as an INDEX (%u of %u)",
                           static_cast<uint32_t>(value), groupCount);
@@ -123,7 +120,7 @@ namespace
 
         // Otherwise a group object: only trust it if it really belongs to this root, which also proves
         // the pointer is a group and not some other structure.
-        void* backRoot = *reinterpret_cast<void**>(static_cast<uint8_t*>(raw) + off::kOffGroupRoot);
+        void* backRoot = static_cast<off::Group*>(raw)->root;
         if (backRoot != root)
             return nullptr;
         if (!g_reportedGroupForm.exchange(true, std::memory_order_relaxed))
@@ -131,20 +128,20 @@ namespace
         return raw;
     }
 
-    /// Legion's condition B: an indoor group carrying transition batches keeps the world visible.
-    /// A and C are evaluated too, for completeness and so the counters tell the truth on other corpora.
+    /// Condition B: an indoor group carrying transition batches keeps the world visible.
+    /// A and C are evaluated too, for completeness and so the counters tell the truth on other files.
     bool GroupReopensExterior(void* group)
     {
         if (!group)
             return false;
-        const uint32_t flags = Rd32(static_cast<uint8_t*>(group) + off::kOffGroupFlags);
-        if (flags & off::kGroupFlagExteriorLit)                       // A
+        auto* g = static_cast<off::Group*>(group);
+        if (g->flags & off::kGroupFlagExteriorLit)                       // A
             return true;
-        if (!(flags & off::kGroupFlagIndoor))
+        if (!(g->flags & off::kGroupFlagIndoor))
             return false;
-        if (flags & off::kGroupFlagExteriorPortal)                    // C
+        if (g->flags & off::kGroupFlagExteriorPortal)                    // C
             return true;
-        return Rd16(static_cast<uint8_t*>(group) + off::kOffGroupTransBatchCount) != 0;  // B
+        return g->transBatchCount != 0;  // B
     }
 
     char __cdecl hkLocateViewerMapObjs(const float* camA, const float* camB, float radius,
@@ -240,18 +237,23 @@ namespace
     float g_capturingUnderZ = 0.0f;
     bool  g_capturing = false;
 
+    /// Runs once per frame regardless of the underside rule, so the 384-float clear is only worth
+    /// paying while the rule can actually populate the table (hkAddOccluderEdge gates its own write on
+    /// the same flag) -- g_undersideActive alone already makes hkHorizonAabbTest skip an untouched
+    /// table, but resetting it here too keeps the state honestly "empty", not just "provably unread".
     void ResetUnderside()
     {
-        for (float& v : g_underside) v = kHorizonEmpty;
         g_undersideActive = false;
+        if (g_undersideRule.load(std::memory_order_relaxed))
+            for (float& v : g_underside) v = kHorizonEmpty;
     }
 
     /**
-     * @brief Suppresses the CPU occluders 3.3.5 builds from a MODERN antiportal group.
+     * @brief Suppresses the CPU occluders the client builds from a MODERN antiportal group.
      *
      * Both engines let a group named "antiportal" hide what is behind it, but they consume it very
-     * differently: 3.3.5 feeds it to an ANGULAR clip buffer -- a coarse solid-angle test, no depth --
-     * while Legion rasterises the mesh into a hi-Z occlusion buffer, so it can only hide what truly
+     * differently: the client feeds it to an ANGULAR clip buffer -- a coarse solid-angle test, no depth --
+     * while a modern hi-Z occlusion buffer instead rasterises the mesh, so it can only hide what truly
      * falls behind its silhouette. Modern antiportals are built for the second: the one inside
      * 9vm_vampire_bridge03 is a 173 x 48 unit slab. Handed to the angular test it subtends an enormous
      * cone, which is why looking at the bridge head-on erases the world behind it while looking at it
@@ -264,15 +266,14 @@ namespace
      */
     void __fastcall hkCreateOccluders(void* group, void* edx)
     {
-        void* root = group ? *reinterpret_cast<void**>(static_cast<uint8_t*>(group) + off::kOffGroupRoot)
-                           : nullptr;
+        auto* g = static_cast<off::Group*>(group);
+        void* root = group ? g->root : nullptr;
         const bool modern = wxl::runtime::wmonative::IsModernRoot(root);
 
         if (modern && g_skipOccluders.load(std::memory_order_relaxed))
         {
-            auto* g = static_cast<uint8_t*>(group);
-            *reinterpret_cast<uint16_t*>(g + off::kOffGroupIntBatchCount) = 0;
-            *reinterpret_cast<uint16_t*>(g + off::kOffGroupExtBatchCount) = 0;
+            g->intBatchCount = 0;
+            g->extBatchCount = 0;
             g_occludersSkipped.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -280,9 +281,7 @@ namespace
         // Let the client build its occluders exactly as it always has; we only note, for each record it
         // allocates, where the group's floor is. That is what turns its skyline into a band later.
         g_capturing = modern;
-        g_capturingUnderZ = modern ? *reinterpret_cast<const float*>(
-                                         static_cast<uint8_t*>(group) + off::kOffGroupBboxMinZ)
-                                   : 0.0f;
+        g_capturingUnderZ = modern ? g->bboxMinZ : 0.0f;
         g_origOccluders(group, edx);
         g_capturing = false;
         g_occludersBuilt.fetch_add(1, std::memory_order_relaxed);
@@ -309,8 +308,8 @@ namespace
      */
     void __fastcall hkAddOccluderEdge(void* vertices, void* edx)
     {
-        // The engine passes this either as the occluder record or as its vertex field; the decompiled
-        // iteration lost the register, so both keys are tried. A wrong key simply misses -- the map only
+        // The engine passes this either as the occluder record or as its vertex field; which one was
+        // observed to vary, so both keys are tried. A wrong key simply misses -- the map only
         // ever holds real occluder records -- so this costs one failed lookup and removes the guess.
         auto it = g_occluderUnderZ.end();
         if (vertices && g_undersideRule.load(std::memory_order_relaxed))
@@ -382,24 +381,17 @@ namespace
     }
 }
 
-namespace wxl_wmo
+namespace wxl_modern_wmo
 {
     bool InstallOutdoorGate()
     {
-        const bool locateOk = HookAttach("WmoOutdoor_LocateViewer", off::kLocateViewerMapObjs,
-                                         &hkLocateViewerMapObjs, &g_origLocate);
-        const bool traverseOk = HookAttach("WmoOutdoor_PortalTraverse", off::kPortalTraverse,
-                                           &hkPortalTraverse, &g_origTraverse);
-        const bool cullOk = HookAttach("WmoOutdoor_CullSortTable", off::kCullSortTable,
-                                       &hkCullSortTable, &g_origCullSort);
-        const bool occlOk = HookAttach("WmoOutdoor_CreateOccluders", off::kCreateOccluders,
-                                       &hkCreateOccluders, &g_origOccluders);
-        const bool allocOk = HookAttach("WmoOutdoor_AllocOccluder", off::kAllocOccluder,
-                                        &hkAllocOccluder, &g_origAlloc);
-        const bool edgeOk = HookAttach("WmoOutdoor_AddOccluderEdge", off::kAddOccluderEdge,
-                                       &hkAddOccluderEdge, &g_origAddEdge);
-        const bool horizonOk = HookAttach("WmoOutdoor_HorizonAabbTest", off::kHorizonAabbTest,
-                                          &hkHorizonAabbTest, &g_origHorizon);
+        const bool locateOk   = HookAttachByName("Wmo.LocateViewerMapObjs", &hkLocateViewerMapObjs, &g_origLocate);
+        const bool traverseOk = HookAttachByName("Wmo.PortalTraverse", &hkPortalTraverse, &g_origTraverse);
+        const bool cullOk     = HookAttachByName("Wmo.CullSortTable", &hkCullSortTable, &g_origCullSort);
+        const bool occlOk     = HookAttachByName("Wmo.CreateOccluders", &hkCreateOccluders, &g_origOccluders);
+        const bool allocOk    = HookAttachByName("Wmo.AllocOccluder", &hkAllocOccluder, &g_origAlloc);
+        const bool edgeOk     = HookAttachByName("Wmo.AddOccluderEdge", &hkAddOccluderEdge, &g_origAddEdge);
+        const bool horizonOk  = HookAttachByName("Wmo.HorizonAabbTest", &hkHorizonAabbTest, &g_origHorizon);
         ResetUnderside();
         // Without the locate detour the rule has no group to test, so it would stand down every frame
         // and only cost a call. Without the sort-table detour it would open the exterior but keep a
@@ -443,7 +435,7 @@ namespace wxl::runtime::wmooutdoor
     bool UndersideRuleEnabled() { return g_undersideRule.load(std::memory_order_relaxed); }
     void SetUndersideRuleEnabled(bool on) { g_undersideRule.store(on, std::memory_order_relaxed); }
 
-    bool Enabled()   { return wxl_wmo::kEnabled; }
+    bool Enabled()   { return wxl_modern_wmo::kEnabled; }
     bool Installed() { return g_installed.load(std::memory_order_relaxed); }
 
     bool RuleEnabled() { return g_ruleEnabled.load(std::memory_order_relaxed); }

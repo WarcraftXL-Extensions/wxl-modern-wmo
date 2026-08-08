@@ -34,10 +34,10 @@
 //   modern single-layer bind whose batch material carries a four-layer snapshot is handed over there.
 
 #include "CompositeShader.hpp"
-#include "ExtensionApi.hpp"
+#include "../ExtensionApi.hpp"
 #include "LayeredShader.hpp"
 #include "ShaderPatch.hpp"
-#include "WmoNative.hpp"
+#include "../load/WmoNative.hpp"
 
 #include "game/Gx.hpp"
 #include "offsets/engine/Gx.hpp"
@@ -76,7 +76,7 @@ namespace
     shoff::EffectBindFn   g_origEffectBind = nullptr;
 
     // Frame stash for the duration of a MODERN WMO batch-draw leaf; read in the effect-bind post-hook.
-    // Render is single-threaded (12340 has no MT render), so plain values are sufficient.
+    // Render is single-threaded (the client has no MT render), so plain values are sufficient.
     bool  g_curModern = false;
     void* g_curRoot   = nullptr;
     void* g_curGroup  = nullptr;
@@ -280,23 +280,20 @@ namespace wxl::runtime::wmocomposite
         return s;
     }
 
-    bool Enabled() { return wxl_wmo::kEnabled; }
+    bool Enabled() { return wxl_modern_wmo::kEnabled; }
     bool Installed() { return g_installed; }
 
     bool FixEnabled() { return g_fixEnabled.load(std::memory_order_relaxed); }
     void SetFixEnabled(bool on) { g_fixEnabled.store(on, std::memory_order_relaxed); }
 }
 
-namespace wxl_wmo
+namespace wxl_modern_wmo
 {
     bool InstallCompositeShader()
     {
-        const bool ext = HookAttach("WmoComposite.ExtRender", wmo::kExtRender,
-                                    &hkExtRender, &g_origExtRender);
-        const bool intr = HookAttach("WmoComposite.IntRender", wmo::kIntRender,
-                                     &hkIntRender, &g_origIntRender);
-        const bool bind = HookAttach("WmoComposite.EffectBind", shoff::kEffectBind,
-                                     &hkEffectBind, &g_origEffectBind);
+        const bool ext  = HookAttachByName("Wmo.ExtRender", &hkExtRender, &g_origExtRender);
+        const bool intr = HookAttachByName("Wmo.IntRender", &hkIntRender, &g_origIntRender);
+        const bool bind = HookAttachByName("Wmo.CompositeEffectBind", &hkEffectBind, &g_origEffectBind);
         g_installed = ext && intr && bind;
         if (!g_installed)
             WLOG_WARN("wmo-composite: install failed (ext=%d int=%d bind=%d); Composite renders stock",

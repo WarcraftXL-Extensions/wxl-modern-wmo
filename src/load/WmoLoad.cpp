@@ -23,14 +23,14 @@
 //
 //   Root       Our walker fills the same 17 slots the stock one does (offsets/game/WMO.hpp kRootSlots),
 //              matching on the tag instead of the position, and reproduces the MOSB emptiness test, the
-//              resulting MOGI sky-flag clear, and the MOPT NaN plane repair. Chunks with no 3.3.5 home
+//              resulting MOGI sky-flag clear, and the MOPT NaN plane repair. Chunks with no 335 home
 //              are counted and skipped -- what a tag-driven walk is for; nothing is rewritten.
 //
 //   Group      Same shape over kGroupSlots, merging the mandatory and optional walkers into one pass.
 //              Presence decides (not the flag bits), which is what makes the modern group's 0x400 LOD bit
 //              harmless. MOCV honours the MOHD gate (WmoVertexColor); MOBN + MOBR go to the stock BSP init.
 //
-//   Parked     What 3.3.5 has no representation for is RETAINED and counted, never rewritten: MODD when
+//   Parked     What the client has no representation for is RETAINED and counted, never rewritten: MODD when
 //              the root ships MODI, MLIQ (modern liquid ids), MOVX (32-bit indices). Parking keeps the
 //              WMO loadable; each counter is the todo list for the next phase.
 
@@ -73,31 +73,15 @@ namespace
         return false;
     }
 
-    /**
-     * @brief Classifies a root buffer without writing anything.
-     *
-     * MODERN means "the positional walker cannot read this": no MOTX (the walker's slot 2, whose
-     * absence shifts every later chunk into the wrong slot) or a GFID present (a Midnight root that
-     * addresses its groups by FileDataID). Both are decided by presence alone, never by MVER.
-     */
-    bool ClassifyRootBuffer(uint8_t* base, uint32_t size)
-    {
-        bool sawMotx = false, sawGfid = false;
-        WalkChunks(base, base + size, [&](uint32_t tag, uint8_t*, uint32_t) {
-            if (tag == off::WmoTag("MOTX")) sawMotx = true;
-            else if (tag == off::WmoTag("GFID")) sawGfid = true;
-        });
-        return !sawMotx || sawGfid;
-    }
 
     /// Clears the SHOW_SKY bit on every MOGI entry, exactly as the stock walker does when the root
     /// carries no skybox name. The write lands in the file buffer because that is where MOGI lives and
     /// where the client itself performs this clear.
     void ClearMogiSkyFlags(void* root)
     {
-        auto* mogi = static_cast<uint8_t*>(GetPtr(root, off::kOffMogiTable));
+        auto* mogi = static_cast<uint8_t*>(static_cast<off::Root*>(root)->mogiTable);
         if (!mogi) return;
-        const uint32_t count = Rd32(Field(root, 0x16C));
+        const uint32_t count = Rd32(Field(root, off::kOffMogiCount));
         for (uint32_t i = 0; i < count; ++i)
         {
             uint8_t* entry = mogi + i * off::kMogiStride;
@@ -109,9 +93,9 @@ namespace
     /// and a distance far outside any map.
     void RepairPortalPlanes(void* root)
     {
-        auto* mopt = static_cast<uint8_t*>(GetPtr(root, 0x138));
+        auto* mopt = static_cast<uint8_t*>(GetPtr(root, off::kOffMopt));
         if (!mopt) return;
-        const uint32_t count = Rd32(Field(root, 0x174));
+        const uint32_t count = Rd32(Field(root, off::kOffMoptCount));
         for (uint32_t i = 0; i < count; ++i)
         {
             uint8_t* plane = mopt + i * 0x14;
@@ -129,8 +113,9 @@ namespace
     /// Tag-driven root fill. Returns false only if the buffer is unusable.
     bool WalkRootModern(void* root)
     {
-        auto* base = static_cast<uint8_t*>(GetPtr(root, off::kOffRootBuffer));
-        const uint32_t size = Rd32(Field(root, off::kOffRootSize));
+        auto* r = static_cast<off::Root*>(root);
+        auto* base = reinterpret_cast<uint8_t*>(r->rootBuffer);
+        const uint32_t size = r->rootSize;
         if (!base || size < 12)
             return false;
 
@@ -158,10 +143,10 @@ namespace
 
         // MOSB present but empty means "no skybox", same as absent -- the stock walker collapses both
         // to a null pointer and then clears the sky bit on every group.
-        auto* mosb = static_cast<uint8_t*>(GetPtr(root, 0x12C));
+        auto* mosb = static_cast<uint8_t*>(GetPtr(root, off::kOffMosb));
         if (mosb && mosb[0] == '\0')
         {
-            SetPtr(root, 0x12C, nullptr);
+            SetPtr(root, off::kOffMosb, nullptr);
             mosb = nullptr;
         }
         if (!mosb)
@@ -172,10 +157,10 @@ namespace
         // MODD indexes MODN by byte offset. A modern root replaced MODN with MODI (an index table), so
         // there is no name blob to resolve against and the stock doodad spawn would read through a null
         // base. Park the definitions -- the data stays in the buffer for the phase that reads MODI.
-        if (!GetPtr(root, 0x150) && Rd32(Field(root, 0x190)) != 0)
+        if (!GetPtr(root, off::kOffModn) && Rd32(Field(root, off::kOffRootDoodadDefs)) != 0)
         {
-            SetU32(root, 0x190, 0);
-            SetPtr(root, 0x154, nullptr);
+            SetU32(root, off::kOffRootDoodadDefs, 0);
+            SetPtr(root, off::kOffRootModd, nullptr);
             g_parkedDoodads.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -183,8 +168,8 @@ namespace
         // INSIDE the record at +0x38/+0x3C -- on a four-layer record those bytes are two of the height
         // texture ids -- so all nine ids are copied out NOW, before material creation runs.
         {
-            auto* materials = static_cast<uint8_t*>(GetPtr(root, off::kOffMaterialBase));
-            const uint32_t count = Rd32(Field(root, off::kOffMaterialCount));
+            auto* materials = static_cast<uint8_t*>(r->materialBase);
+            const uint32_t count = r->materialCount;
             // Buffer reads happen OUTSIDE the lock: this runs under the walk's SEH net, and a fault
             // while holding the mutex would abandon it for every later load.
             std::unordered_map<uint32_t, wxl::runtime::wmonative::LayeredMaterial> found;
@@ -216,8 +201,15 @@ namespace
 
     void __fastcall hkRootWalk(void* root, void* edx)
     {
-        auto* base = static_cast<uint8_t*>(GetPtr(root, off::kOffRootBuffer));
-        const uint32_t size = Rd32(Field(root, off::kOffRootSize));
+        // Background stage1 already walked this root (see WmoAsync.cpp's SubmitRootComplete): the fields
+        // are already populated, so let the native caller's own remainder (CreateData's materials/MOHD
+        // copy/group allocation) continue exactly as if it had called the walker itself.
+        if (TakePrewalkedRoot(root))
+            return;
+
+        auto* r = static_cast<off::Root*>(root);
+        auto* base = reinterpret_cast<uint8_t*>(r->rootBuffer);
+        const uint32_t size = r->rootSize;
 
         bool modern = false;
         if (base && size >= 12)
@@ -225,38 +217,24 @@ namespace
             __try { modern = ClassifyRootBuffer(base, size); }
             __except (EXCEPTION_EXECUTE_HANDLER) { modern = false; }
         }
-        RecordRootKind(root, modern);
-        // Drop a recycled root slot's previous four-layer snapshot; the modern walk re-registers.
-        DropLayeredRoot(root);
 
         if (!modern)
         {
+            RecordRootKind(root, false);
+            DropLayeredRoot(root);
             g_rootsStock.fetch_add(1, std::memory_order_relaxed);
             g_origRootWalk(root, edx);
             return;
         }
-
-        bool ok = false;
-        __try { ok = WalkRootModern(root); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-
-        if (!ok)
-        {
-            // A modern root the stock walker cannot read either: leave every slot null rather than
-            // hand it wild pointers. CreateData then allocates zero groups and the WMO stays empty.
-            RecordRootKind(root, false);
-            WLOG_ERROR("wmo-native: root walk failed, map object left empty (path '%s')",
-                       reinterpret_cast<const char*>(Field(root, off::kOffNameInline)));
-            return;
-        }
-        g_rootsModern.fetch_add(1, std::memory_order_relaxed);
+        WalkModernRoot(root);
     }
 
     /// Tag-driven group fill, merging the stock mandatory and optional walkers into one pass.
     bool WalkGroupModern(void* group, uint8_t* cursor)
     {
-        auto* base = static_cast<uint8_t*>(GetPtr(group, off::kOffGroupBuffer));
-        const uint32_t size = Rd32(Field(group, off::kOffGroupSize));
+        auto* g = static_cast<off::Group*>(group);
+        auto* base = reinterpret_cast<uint8_t*>(g->groupBuffer);
+        const uint32_t size = g->groupSize;
         if (!base || !cursor || size < 0x58)
             return false;
 
@@ -363,54 +341,58 @@ namespace
         }
 
         // UV routing: base = set 0, file order, always -- the confirmed contract for every material
-        // family (Legion ids <= 22 sample set 0 for the base; the four-layer material samples set i per
+        // family (modern ids <= 22 sample set 0 for the base; the four-layer material samples set i per
         // LAYER, served by the layered draw path from the side data below, never by reordering slots).
 
-        // BSP: the stock walker hands the two adjacent chunks straight to CAaBsp, which only copies
-        // pointers and counts. Both must be present -- a lone MOBN would leave the face list null.
+        // BSP: the stock walker hands the two adjacent chunks straight to the BSP container, which only
+        // copies pointers and counts. Both must be present -- a lone MOBN would leave the face list null.
         if (mobn && mobr)
         {
             wxl::game::Native<off::Wmo_BspInitFn>(off::kBspInit)(
                 Field(group, off::kOffGroupBsp), nullptr,
                 mobn, mobnSize >> 4, mobr, mobrSize >> 1,
-                reinterpret_cast<float*>(Field(group, 0x34)));
+                reinterpret_cast<float*>(Field(group, off::kOffGroupBbox)));
         }
 
         // A modern group can carry geometry with NO texture coordinates at all: collision-only shells (a
-        // handful of faces, no MOBA, every batch count 0). 3.3.5 has no such case, so FillVertexVB0 reads
+        // handful of faces, no MOBA, every batch count 0). The client has no such case, so FillVertexVB0 reads
         // MOTV (+0xF0) and MONR (+0xEC) UNCONDITIONALLY once the vertex count is non-zero, and faults on
         // the null. Such a group has nothing to draw, so only the runtime VERTEX count is zeroed: the
         // vertex fill skips it entirely, while MOPY / MOVI / MOVT and the BSP keep their pointers and
         // counts, so collision and portals are untouched. A group WITH batches but no UVs gets an error
         // line rather than silent parking.
-        if (Rd32(Field(group, 0x15C)) != 0 && (!GetPtr(group, 0xF0) || !GetPtr(group, 0xEC)))
+        if (Rd32(Field(group, off::kOffGroupVertexCount)) != 0 &&
+            (!GetPtr(group, off::kOffGroupMotv) || !GetPtr(group, off::kOffGroupMonr)))
         {
-            if (Rd32(Field(group, 0x16C)) != 0)
+            const uint32_t batchCountForLog = Rd32(Field(group, off::kGroupSlots[5].countField));
+            if (batchCountForLog != 0)
                 WLOG_ERROR("wmo-native: group has %u batches but no MOTV/MONR; parking its vertices",
-                           Rd32(Field(group, 0x16C)));
-            SetU32(group, 0x15C, 0);
+                           batchCountForLog);
+            SetU32(group, off::kOffGroupVertexCount, 0);
             g_parkedNoUv.fetch_add(1, std::memory_order_relaxed);
         }
 
         // MOBA material index: copied into place rather than patched at the read site. Guarded three
         // ways -- the batch must announce the modern form, the destination byte must still be untouched,
         // and the index must be one this client can address (its readers are all `movzx byte`).
-        if constexpr (wxl_wmo::kEnabled)
+        if constexpr (wxl_modern_wmo::kEnabled)
         {
-            auto* batches = static_cast<uint8_t*>(GetPtr(group, off::kGroupSlots[5].ptrField));
+            auto* batches = static_cast<off::MobaRecord*>(GetPtr(group, off::kGroupSlots[5].ptrField));
             const uint32_t batchCount = Rd32(Field(group, off::kGroupSlots[5].countField));
             if (batches)
             {
                 uint32_t moved = 0;
                 for (uint32_t i = 0; i < batchCount; ++i)
                 {
-                    uint8_t* rec = batches + i * off::kMobaStride;
-                    if (!(rec[off::kOffMobaFlags] & off::kMobaFlagMaterialModern)) continue;
-                    if (rec[off::kOffMobaMaterial] != 0) continue;
-                    uint16_t modern;
-                    std::memcpy(&modern, rec + off::kOffMobaMaterialModern, 2);
-                    if (modern > 0xFF) { g_materialOutOfRange.fetch_add(1, std::memory_order_relaxed); continue; }
-                    rec[off::kOffMobaMaterial] = static_cast<uint8_t>(modern);
+                    off::MobaRecord& rec = batches[i];
+                    if (!(rec.flags & off::kMobaFlagMaterialModern)) continue;
+                    if (rec.material != 0) continue;
+                    if (rec.materialModern > 0xFF)
+                    {
+                        g_materialOutOfRange.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    rec.material = static_cast<uint8_t>(rec.materialModern);
                     ++moved;
                 }
                 g_materialIdsMoved.fetch_add(moved, std::memory_order_relaxed);
@@ -423,7 +405,7 @@ namespace
         // Four-layer side data: registered only when the group ships all four UV sets AND a weight chunk
         // covering every vertex -- exactly the population that carries four-layer materials. Pointers
         // land in the resident group buffer; the layered draw path copies them into its own stream.
-        if (const uint32_t vertexCount = Rd32(Field(group, 0x15C));
+        if (const uint32_t vertexCount = Rd32(Field(group, off::kOffGroupVertexCount));
             moc2 && motvSeen >= 4 && vertexCount != 0 && moc2Size >= vertexCount * 4 &&
             motvSize[0] >= vertexCount * 8 && motvSize[1] >= vertexCount * 8 &&
             motvSize[2] >= vertexCount * 8 && motvSize[3] >= vertexCount * 8)
@@ -438,23 +420,22 @@ namespace
 
     void __fastcall hkGroupWalk(void* group, void* edx, void* cursor)
     {
-        // A pooled group slot may be reused by a different group; drop any previous occupant's layered
-        // side data before either walk runs (the modern walk re-registers when the data is present).
-        DropLayeredGroup(group);
+        // Background stage1 already walked this group (see WmoAsync.cpp's SubmitGroupComplete): let the
+        // native caller's own remainder (CreateMaterial/antiportal/bbox/two-UV, in the group-create routine)
+        // continue exactly as if it had called the walker itself.
+        if (TakePrewalkedGroup(group))
+            return;
 
-        void* root = GetPtr(group, off::kOffGroupRoot);
+        void* root = static_cast<off::Group*>(group)->root;
         if (!root || !RootIsModern(root))
         {
+            // A pooled group slot may be reused by a different group; drop any previous occupant's
+            // layered side data before either walk runs (the modern walk re-registers when present).
+            DropLayeredGroup(group);
             g_origGroupWalk(group, edx, cursor);
             return;
         }
-
-        bool ok = false;
-        __try { ok = WalkGroupModern(group, static_cast<uint8_t*>(cursor)); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-
-        if (ok) g_groupsModern.fetch_add(1, std::memory_order_relaxed);
-        else    g_groupsFailed.fetch_add(1, std::memory_order_relaxed);
+        WalkModernGroup(group, cursor);
     }
 
     /**
@@ -465,7 +446,7 @@ namespace
      * is rejected as soon as the camera comes close enough for that single point to leave the frustum.
      * That is exactly the "the nearer I get, the more of the building disappears" symptom.
      *
-     * A modern file simply does not ship this box (Legion culls per group and on the GPU). Inventing one
+     * A modern file simply does not ship this box (modern content culls per group and on the GPU). Inventing one
      * inside the record is not an option -- it would overwrite the material index at +0x0A -- so the
      * per-batch REFINEMENT is skipped for modern batches: they are reported visible, and group-level
      * frustum, portal and horizon culling still decide. The test is deliberately narrow: the announce bit
@@ -480,7 +461,10 @@ namespace
                 Rd32(rec) == 0 && Rd32(rec + 4) == 0 && rec[8] == 0 && rec[9] == 0)
             {
                 g_batchCullBypassed.fetch_add(1, std::memory_order_relaxed);
-                g_curBatch = mobaRecord;    // the effect bind that follows belongs to this batch
+                // Latched for whichever effect-bind happens to read it next -- TryBindLayered consumes
+                // (and clears) it immediately, since this call site has no way to know if that read is
+                // really "the one that follows" or a later, unrelated bind (see ClearCurrentBatch()).
+                g_curBatch = mobaRecord;
                 return 0;   // 0 = keep this batch
             }
         }
@@ -490,18 +474,87 @@ namespace
 
 namespace wxl::runtime::wmonative::detail
 {
+    /**
+     * @brief Classifies a root buffer without writing anything.
+     *
+     * MODERN means "the positional walker cannot read this": no MOTX (the walker's slot 2, whose
+     * absence shifts every later chunk into the wrong slot) or a GFID present (a Midnight root that
+     * addresses its groups by FileDataID). Both are decided by presence alone, never by MVER.
+     *
+     * Exposed (not anonymous-namespace-private) so WmoAsync.cpp's SubmitRootComplete can classify a root
+     * BEFORE deciding whether to hand its walk to the background pool.
+     */
+    bool ClassifyRootBuffer(uint8_t* base, uint32_t size)
+    {
+        bool sawMotx = false, sawGfid = false;
+        WalkChunks(base, base + size, [&](uint32_t tag, uint8_t*, uint32_t) {
+            if (tag == off::WmoTag("MOTX")) sawMotx = true;
+            else if (tag == off::WmoTag("GFID")) sawGfid = true;
+        });
+        return !sawMotx || sawGfid;
+    }
+
+    /**
+     * @brief Runs the modern-root walk + its bookkeeping (record/drop/stats/error-handling), for a root
+     *        the caller has ALREADY confirmed classifies modern.
+     *
+     * Shared between hkRootWalk's own "modern" branch (a root reached without going through
+     * SubmitRootComplete first -- the untouched safety net) and WmoAsync.cpp's background stage1 (a root
+     * that WAS submitted, walked off the main thread). Exactly one source of truth for what "walk this
+     * root" means, so the two call paths can never drift apart.
+     */
+    void WalkModernRoot(void* root)
+    {
+        auto* r = static_cast<off::Root*>(root);
+        RecordRootKind(root, true);
+        // Drop a recycled root slot's previous four-layer snapshot; the modern walk re-registers.
+        DropLayeredRoot(root);
+
+        bool ok = false;
+        __try { ok = WalkRootModern(root); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+
+        if (!ok)
+        {
+            // A modern root the stock walker cannot read either: leave every slot null rather than
+            // hand it wild pointers. CreateData then allocates zero groups and the WMO stays empty.
+            RecordRootKind(root, false);
+            WLOG_ERROR("wmo-native: root walk failed, map object left empty (path '%s')", r->nameInline);
+            return;
+        }
+        g_rootsModern.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Runs the modern-group walk + its bookkeeping, for a group whose root the caller has ALREADY
+     *        confirmed is modern. Mirrors WalkModernRoot -- see its own doc comment.
+     */
+    void WalkModernGroup(void* group, void* cursor)
+    {
+        // A pooled group slot may be reused by a different group; drop any previous occupant's layered
+        // side data before the walk runs (the modern walk re-registers when the data is present).
+        DropLayeredGroup(group);
+
+        bool ok = false;
+        __try { ok = WalkGroupModern(group, static_cast<uint8_t*>(cursor)); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+
+        if (ok) g_groupsModern.fetch_add(1, std::memory_order_relaxed);
+        else    g_groupsFailed.fetch_add(1, std::memory_order_relaxed);
+    }
+
     bool InstallRootWalk()
     {
-        return wxl_wmo::HookAttach("WmoNative_RootWalk", off::kRootWalk, &hkRootWalk, &g_origRootWalk);
+        return wxl_modern_wmo::HookAttachByName("Wmo.RootWalk", &hkRootWalk, &g_origRootWalk);
     }
 
     bool InstallGroupWalk()
     {
-        return wxl_wmo::HookAttach("WmoNative_GroupWalk", off::kGroupWalk, &hkGroupWalk, &g_origGroupWalk);
+        return wxl_modern_wmo::HookAttachByName("Wmo.GroupWalk", &hkGroupWalk, &g_origGroupWalk);
     }
 
     bool InstallCull()
     {
-        return wxl_wmo::HookAttach("WmoNative_CullBatch", off::kCullBatch, &hkCullBatch, &g_origCullBatch);
+        return wxl_modern_wmo::HookAttachByName("Wmo.CullBatch", &hkCullBatch, &g_origCullBatch);
     }
 }

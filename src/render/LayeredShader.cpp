@@ -25,14 +25,14 @@
 //     blend = sum_i diffuse_i(uv set i) * w'_i           layer i samples UV set i, 1:1, untransformed
 //     rgb   = lerp(blend.rgb, tint.rgb, w.w)             per-material tint by the weight alpha
 //   and the result then feeds the standard combine (texture x vertex colour x lighting x 2) that the
-//   3.3.5 pipeline already performs. So the takeover is surgical: the stock single-layer VS gains four
+//   client's pipeline already performs. So the takeover is surgical: the stock single-layer VS gains four
 //   pass-through outputs (UV sets B..D + weights, sourced from a second vertex stream), the stock PS's
 //   single diffuse fetch becomes the block above, and NOTHING else changes -- the client's own
 //   lighting, fog and alpha path run untouched on the blended texel.
 //
 //   Data path per batch: the loader side data (four MOTV sets + the weight chunk) is copied once per
-//   group into a MANAGED second vertex stream (36 B/vertex); the draw is wrapped by wxl-m2's one-shot
-//   interceptor (wxl.m2draw, since wxl-m2 owns the DrawIndexedPrimitive vtable slot), which attaches
+//   group into a MANAGED second vertex stream (36 B/vertex); the draw is wrapped by wxl-modern-m2's one-shot
+//   interceptor (wxl.m2draw, since wxl-modern-m2 owns the DrawIndexedPrimitive vtable slot), which attaches
 //   stream 1 + a custom declaration, rebases stream 0 so both streams share the group's vertex indexing,
 //   issues the native draw, and restores every touched device state. Layer textures ride the engine's
 //   own texture states (flushed with the draw like the client's own binds), so no raw SetTexture ever
@@ -42,10 +42,10 @@
 //   interpolant the stock single-layer VS does not compute) and pre-SM3 shader profiles (the patchers
 //   require the vs_3_0/ps_3_0 forms; older profiles keep the stock single-layer look, counted).
 
-#include "ExtensionApi.hpp"
+#include "../ExtensionApi.hpp"
 #include "LayeredShader.hpp"
 #include "ShaderPatch.hpp"
-#include "WmoNative.hpp"
+#include "../load/WmoNative.hpp"
 
 #include "game/Binding.hpp"
 #include "game/Gx.hpp"
@@ -81,13 +81,13 @@ namespace
     // ------------------------------------------------------------------ state
     /// Second vertex stream layout: four UV sets (float2 each) + the weight dword. The weight bytes are
     /// copied raw; the declaration reads them as D3DCOLOR, whose byte order makes stored byte 2 the
-    /// shader's .x -- the layer-A slot, matching the one-hot population measured across the corpus.
+    /// shader's .x -- the layer-A slot, matching the one-hot population measured across the sampled files.
     constexpr uint32_t kStream1Stride = 4 * 8 + 4;
 
     struct PatchedPair
     {
-        void* vs = nullptr;   ///< patched CGxShader wrapper for GxState slot 0x4D
-        void* ps = nullptr;   ///< patched CGxShader wrapper for GxState slot 0x4E
+        void* vs = nullptr;   ///< patched GPU-shader wrapper for GxState slot 0x4D
+        void* ps = nullptr;   ///< patched GPU-shader wrapper for GxState slot 0x4E
         int   tintReg = -1;   ///< PS constant register receiving {tint.rgb, enable}
     };
 
@@ -566,7 +566,7 @@ namespace
 
     // ------------------------------------------------------------------ the draw wrap
     /**
-     * @brief One-shot interceptor around the batch's native draw, published by wxl-m2 as wxl.m2draw
+     * @brief One-shot interceptor around the batch's native draw, published by wxl-modern-m2 as wxl.m2draw
      *        (SetOneShotIntercept) since it owns the DrawIndexedPrimitive vtable slot.
      *
      * The client submits raw group-relative indices and lets BaseVertexIndex carry the vertex pool
@@ -624,7 +624,7 @@ namespace
     void* LoadByFdid(uint32_t fdid)
     {
         if (!fdid) return nullptr;
-        const char* path = wxl_wmo::ResolveTexture(fdid);
+        const char* path = wxl_modern_wmo::ResolveTexture(fdid);
         if (!path || !path[0]) return nullptr;
         return wxl::game::Native<adt::Map_LoadTextureFn>(adt::kMapLoadTexture)(path);
     }
@@ -653,10 +653,15 @@ namespace wxl::features::wmolayered
     void TryBindLayered(void* root, void* group, uint32_t vtxIdx, uint32_t pixIdx, void* collection,
                         void* gxDevice)
     {
-        if constexpr (!wxl_wmo::kEnabled)
+        if constexpr (!wxl_modern_wmo::kEnabled)
             return;
 
+        // Consume the latch immediately, before any other check: hkCullBatch has no way to know which
+        // effect-bind call is really "the one that follows", so a stale value must never survive to be
+        // read by a LATER, unrelated bind -- see ClearCurrentBatch()'s own doc comment (confirmed off a
+        // real crash dump: a stale batch from an unloaded WMO group read as live).
         const void* batch = rt::CurrentBatch();
+        rt::ClearCurrentBatch();
         if (!batch || !gxDevice) return;
         rt::LayeredMaterial* mat = rt::FindLayeredMaterial(root, rt::BatchMaterialIndex(batch));
         if (!mat) return;
@@ -727,7 +732,7 @@ namespace wxl::features::wmolayered
             4, pair->tintReg, tintVec, 1);
 
         g_pendingVb = vb1;
-        if (const WXL_M2DrawApi* m2draw = wxl_wmo::M2Draw())
+        if (const WXL_M2DrawApi* m2draw = wxl_modern_wmo::M2Draw())
             m2draw->SetOneShotIntercept(&DrawLayered);
     }
 
@@ -736,8 +741,8 @@ namespace wxl::features::wmolayered
         // Disarm a bind whose draw never issued, and clear the extra texture stages so no layer
         // texture outlives the leaf in the engine's state cache. The disarm is unconditional -- the
         // m2draw slot cannot be read back across the ABI, so this is a harmless no-op when the draw
-        // already consumed the one-shot (or wxl-m2 hasn't published yet).
-        if (const WXL_M2DrawApi* m2draw = wxl_wmo::M2Draw())
+        // already consumed the one-shot (or wxl-modern-m2 hasn't published yet).
+        if (const WXL_M2DrawApi* m2draw = wxl_modern_wmo::M2Draw())
             m2draw->SetOneShotIntercept(nullptr);
         g_pendingVb = nullptr;
         if (!g_stagesBound || !gxDevice) return;
