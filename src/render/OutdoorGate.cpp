@@ -40,6 +40,7 @@
 #include "OutdoorGate.hpp"
 #include "../load/WmoNative.hpp"
 
+#include "game/Wmo.hpp"
 #include "offsets/game/WMO.hpp"
 
 #include <atomic>
@@ -71,8 +72,6 @@ namespace
     /// the rule works either way and says so in the log the first time it decides.
     std::atomic<void*> g_viewerGroupRaw{nullptr};
     std::atomic<bool>  g_reportedGroupForm{false};
-
-    inline float OutdoorGate() { return *reinterpret_cast<const float*>(off::kOutdoorEnabled); }
 
     /// Writes the five floats the engine's own outdoor branch writes: full screen rect, gate open.
     void OpenExterior()
@@ -165,7 +164,7 @@ namespace
 
         g_framesIndoor.fetch_add(1, std::memory_order_relaxed);
 
-        if (OutdoorGate() >= 0.0f)
+        if (wxl::game::wmo::GetOutdoorGateValue() >= 0.0f)
         {
             g_framesPortalOpen.fetch_add(1, std::memory_order_relaxed); // stock portal rule already won
             return;

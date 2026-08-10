@@ -25,31 +25,15 @@
 #include "WmoNative.hpp"
 #include "WmoNativeShared.hpp"
 
-#include "offsets/game/WMO.hpp"
+#include "game/Wmo.hpp"
 
 #include <atomic>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
-
-namespace off = wxl::offsets::game::wmo;
 
 namespace
 {
     using namespace wxl::runtime::wmonative::detail;
-
-    /// A modern MOBA batch carries its material index as a u16 at +0x0A (announced by flag bit 0x02 at
-    /// +0x16); a stock batch keeps the client's u8 at +0x17. Read whichever this record announces.
-    inline uint32_t BatchMaterialIndex(const uint8_t* rec)
-    {
-        if (rec[off::kOffMobaFlags] & off::kMobaFlagMaterialModern)
-        {
-            uint16_t m;
-            std::memcpy(&m, rec + off::kOffMobaMaterialModern, 2);
-            return m;
-        }
-        return rec[off::kOffMobaMaterial];
-    }
 }
 
 // ---------------------------------------------------------------- public query surface
@@ -115,7 +99,7 @@ namespace wxl::runtime::wmonative
 
     uint32_t BatchMaterialIndex(const void* mobaRecord)
     {
-        return ::BatchMaterialIndex(static_cast<const uint8_t*>(mobaRecord));
+        return wxl::game::wmo::GetBatchMaterialIndex(mobaRecord);
     }
 
     const void* CurrentBatch() { return detail::g_curBatch; }
